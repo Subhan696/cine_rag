@@ -6,7 +6,11 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "seed": "ts-node ./app/scripts/loadDb.ts",
+     "seed:2000": "cross-env START_YEAR=2000 END_YEAR=2005 ts-node ./app/scripts/loadDb.ts",
+  "seed:2006": "cross-env START_YEAR=2006 END_YEAR=2010 ts-node ./app/scripts/loadDb.ts",
+  "seed:2011": "cross-env START_YEAR=2011 END_YEAR=2015 ts-node ./app/scripts/loadDb.ts",
+  "seed:2016": "cross-env START_YEAR=2016 END_YEAR=2020 ts-node ./app/scripts/loadDb.ts",
+  "seed:2021": "cross-env START_YEAR=2021 END_YEAR=2025 ts-node ./app/scripts/loadDb.ts",
     "lint": "next lint"
   },
   "dependencies": {
@@ -29,6 +33,7 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "cross-env": "^10.0.0",
     "eslint": "^9",
     "eslint-config-next": "15.4.5",
     "tailwindcss": "^4",
