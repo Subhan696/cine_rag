@@ -6,6 +6,7 @@ import pLimit from "p-limit";
 import crypto from "crypto";
 import "dotenv/config";
 
+// === Env Vars ===
 const {
   ASTRA_DB_NAMESPACE,
   ASTRA_DB_COLLECTION,
@@ -20,22 +21,24 @@ const {
 const startYear = parseInt(START_YEAR || "2000", 10);
 const endYear = parseInt(END_YEAR || "2025", 10);
 
+// === Astra Setup ===
 const client = new DataAPIClient(ASTRA_DB_APPLICATION_TOKEN!);
 const db = client.db(ASTRA_DB_API_ENDPOINT!, { keyspace: ASTRA_DB_NAMESPACE! });
 const splitter = new RecursiveCharacterTextSplitter({ chunkSize: 512, chunkOverlap: 100 });
 
+// === Gemini Setup ===
 const genAI = new GoogleGenerativeAI(GOOGLE_API_KEY!);
 const embeddingModel = genAI.getGenerativeModel({ model: "models/embedding-001" });
-
-function hashId(input: string) {
-  return crypto.createHash("sha256").update(input).digest("hex");
-}
 
 async function getGeminiEmbedding(text: string): Promise<number[]> {
   const result = await embeddingModel.embedContent({
     content: { role: "user", parts: [{ text }] },
   });
   return result.embedding.values;
+}
+
+function hashId(input: string) {
+  return crypto.createHash("sha256").update(input).digest("hex");
 }
 
 async function fetchMoviesByYear(year: number, page: number): Promise<any[]> {
@@ -53,19 +56,24 @@ async function fetchWatchProviders(movieId: number): Promise<string[]> {
   return providers.map((p: any) => p.provider_name);
 }
 
+// === Retry Helper ===
 async function withRetry<T>(fn: () => Promise<T>, retries = 3): Promise<T> {
   for (let i = 0; i <= retries; i++) {
     try {
       return await fn();
-    } catch (err) {
+    } catch (err: any) {
+      if (err.message?.includes("already exists with the given _id")) {
+        throw err; // Skip retry on duplicates
+      }
       if (i === retries) throw err;
-      console.warn(`⏳ Retry ${i + 1} after error: ${err}`);
+      console.warn(`⏳ Retry ${i + 1} after error: ${err.message}`);
       await new Promise((res) => setTimeout(res, 1000 * (i + 1)));
     }
   }
   throw new Error("Unreachable");
 }
 
+// === Ingest Logic ===
 async function ingestMovies(collection: any) {
   console.log(`🚀 INGESTING MOVIES ${startYear}–${endYear}`);
   const limit = pLimit(5); // Concurrency control
@@ -92,9 +100,9 @@ async function ingestMovies(collection: any) {
           const chunkDocs = await Promise.all(
             chunks.map(async (chunk, i) => {
               const vector = await withRetry(() => getGeminiEmbedding(chunk));
-              const uniqueId = hashId(`${title}_${release_date}_${i}`);
+              const _id = hashId(`${title}_${release_date}_${i}`);
               return {
-                _id: uniqueId,
+                _id,
                 $vector: vector,
                 text: chunk,
                 title,
@@ -108,11 +116,18 @@ async function ingestMovies(collection: any) {
           );
 
           try {
-            await withRetry(() => collection.insertMany(chunkDocs));
-            console.log(`✅ Inserted: "${title}" (${chunks.length} chunks)`);
+            await collection.insertMany(chunkDocs);
+            console.log(`✅ Inserted: "${title}" (${chunkDocs.length} chunks)`);
           } catch (err: any) {
-            if (err.message.includes("conflict")) {
-              console.warn(`⚠️ Skipped duplicate: "${title}"`);
+            if (err.message?.includes("already exists with the given _id")) {
+              // Count skipped vs inserted
+              const skippedCount = (err.message.match(/_id/g) || []).length;
+              const insertedCount = chunkDocs.length - skippedCount;
+              const summary =
+                insertedCount > 0
+                  ? `⚠️ Partially skipped: "${title}" – inserted ${insertedCount}, skipped ${skippedCount}`
+                  : `⚠️ Skipped duplicate: "${title}"`;
+              console.warn(summary);
             } else {
               console.error(`❌ Failed to insert ${title}:`, err);
             }
@@ -125,6 +140,7 @@ async function ingestMovies(collection: any) {
   }
 }
 
+// === Main ===
 async function main() {
   try {
     await db.createCollection(ASTRA_DB_COLLECTION!, {
