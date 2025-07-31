@@ -2,9 +2,10 @@ import { DataAPIClient } from "@datastax/astra-db-ts"
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters"
 import { GoogleGenerativeAI } from "@google/generative-ai"
 import fetch from "node-fetch"
+import dns from "dns"
+import pLimit from "p-limit"
 import "dotenv/config"
 
-// === ENV ===
 const {
   ASTRA_DB_NAMESPACE,
   ASTRA_DB_COLLECTION,
@@ -14,16 +15,32 @@ const {
   TMDB_API_KEY
 } = process.env
 
-// === Astra DB Setup ===
-const client = new DataAPIClient(ASTRA_DB_APPLICATION_TOKEN!)
-const db = client.db(ASTRA_DB_API_ENDPOINT!, { keyspace: ASTRA_DB_NAMESPACE! })
-
-// === Gemini Setup ===
 const genAI = new GoogleGenerativeAI(GOOGLE_API_KEY!)
 const embeddingModel = genAI.getGenerativeModel({ model: "models/embedding-001" })
 
-// === Timeout Wrapper for Gemini Embedding ===
-const timeout = (ms: number) => new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout")), ms))
+const client = new DataAPIClient(ASTRA_DB_APPLICATION_TOKEN!)
+const db = client.db(ASTRA_DB_API_ENDPOINT!, { keyspace: ASTRA_DB_NAMESPACE! })
+
+const splitter = new RecursiveCharacterTextSplitter({ chunkSize: 512, chunkOverlap: 100 })
+
+const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms))
+
+async function isOnline(): Promise<boolean> {
+  return new Promise((resolve) => {
+    dns.lookup("google.com", (err) => resolve(!err))
+  })
+}
+
+async function waitForInternet(maxWait = 60000) {
+  const start = Date.now()
+  while (!(await isOnline())) {
+    if (Date.now() - start > maxWait) {
+      throw new Error("🛑 No internet connection for too long. Aborting.")
+    }
+    console.log("⏳ Waiting for internet...")
+    await sleep(5000)
+  }
+}
 
 async function getGeminiEmbedding(text: string): Promise<number[]> {
   const result = await embeddingModel.embedContent({
@@ -32,39 +49,6 @@ async function getGeminiEmbedding(text: string): Promise<number[]> {
   return result.embedding.values
 }
 
-async function getEmbeddingWithTimeout(text: string): Promise<number[]> {
-  return await Promise.race([
-    getGeminiEmbedding(text),
-    timeout(10000) as Promise<never> // 10 seconds, ensure type never so it only rejects
-  ])
-}
-
-// === Chunk Splitter ===
-const splitter = new RecursiveCharacterTextSplitter({
-  chunkSize: 512,
-  chunkOverlap: 100,
-})
-
-// === Utility ===
-const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms))
-
-// === Create Collection ===
-const createCollection = async () => {
-  try {
-    await db.createCollection(ASTRA_DB_COLLECTION!, {
-      vector: { dimension: 768, metric: "cosine" },
-    })
-    console.log("✅ Collection created")
-  } catch (err: any) {
-    if (err.message.includes("already exists")) {
-      console.log("ℹ️ Collection already exists")
-    } else {
-      throw err
-    }
-  }
-}
-
-// === Fetch Movies ===
 async function fetchMoviesByYear(year: number, page: number = 1) {
   const url = `https://api.themoviedb.org/3/discover/movie?api_key=${TMDB_API_KEY}&language=en-US&sort_by=popularity.desc&include_adult=false&include_video=false&primary_release_year=${year}&page=${page}`
   const res = await fetch(url)
@@ -76,7 +60,6 @@ async function fetchMoviesByYear(year: number, page: number = 1) {
   return data.results || []
 }
 
-// === Fetch Watch Providers ===
 async function fetchWatchProviders(movieId: number): Promise<string[]> {
   const url = `https://api.themoviedb.org/3/movie/${movieId}/watch/providers?api_key=${TMDB_API_KEY}`
   try {
@@ -84,99 +67,102 @@ async function fetchWatchProviders(movieId: number): Promise<string[]> {
     const data = await res.json()
     const usProviders = data.results?.US?.flatrate || []
     return usProviders.map((p: any) => p.provider_name)
-  } catch (err) {
-    console.error(`❌ Watch provider fetch failed for ${movieId}:`, err)
+  } catch {
     return []
   }
 }
 
-// === Ingest Movies ===
+const createCollection = async () => {
+  const res = await db.createCollection(ASTRA_DB_COLLECTION!, {
+    vector: { dimension: 768, metric: "cosine" },
+  })
+  console.log("✅ Collection created:", res)
+}
+
+const insertWithRetry = async (collection, doc, maxRetries = 3) => {
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      return await collection.insertOne(doc)
+    } catch (err: any) {
+      if (err.code?.includes("TIMEOUT") || err.code?.includes("UND_ERR_CONNECT_TIMEOUT")) {
+        console.warn(`⚠️ Timeout on attempt ${i + 1}. Retrying...`)
+        await waitForInternet()
+        await sleep(3000 * (i + 1)) // exponential backoff
+      } else {
+        throw err
+      }
+    }
+  }
+  throw new Error(`❌ Max retries reached for ${doc.title}`)
+}
+
 const ingestMovies = async (startYear = 2000, endYear = 2025) => {
   const collection = await db.collection(ASTRA_DB_COLLECTION!)
-  let counter = 0
+  const limit = pLimit(3)
 
   for (let year = startYear; year <= endYear; year++) {
-    console.log(`📅 Year: ${year}`)
+    console.log(`📅 Processing Year: ${year}`)
+
     for (let page = 1; page <= 500; page++) {
-      console.log(`  🌐 Page: ${page}`)
+      console.log(`  🌐 Page ${page}`)
       const movies = await fetchMoviesByYear(year, page)
       if (movies.length === 0) break
 
-      for (const movie of movies) {
-        const title = movie.title?.trim()
-        const releaseDate = movie.release_date?.trim()
-        const overview = movie.overview?.trim()
-        const rating = movie.vote_average
+      const tasks = movies.map((movie) =>
+        limit(async () => {
+          const title = movie.title || ""
+          const overview = movie.overview || ""
+          const release_date = movie.release_date || ""
 
-        if (!title || !releaseDate || !overview || rating < 7.0) continue
+          if (!title || !overview || movie.vote_average * 10 < 70) return
 
-        const providers = await fetchWatchProviders(movie.id)
-        const providerText = providers.length > 0
-          ? `Available on: ${providers.join(", ")}`
-          : "Availability: Unknown"
+          const exists = await collection.findOne({ title, release_date })
+          if (exists) {
+            console.log(`⚠️ Skipped duplicate: "${title}" (${release_date})`)
+            return
+          }
 
-        const content = `
+          const providers = await fetchWatchProviders(movie.id)
+          const providerText = providers.length > 0 ? `Available on: ${providers.join(", ")}` : "Availability: Unknown"
+
+          const fullText = `
 Title: ${title}
 Overview: ${overview}
-Rating: ${rating}
-Release Date: ${releaseDate}
+Rating: ${movie.vote_average}
+Release Date: ${release_date}
 ${providerText}`
 
-        const chunks = await splitter.splitText(content)
+          const chunks = await splitter.splitText(fullText)
 
-        for (const chunk of chunks) {
-          try {
-            const vector = await getEmbeddingWithTimeout(chunk)
-            await collection.updateOne(
-              {
+          for (const chunk of chunks) {
+            try {
+              const vector = await getGeminiEmbedding(chunk)
+              await insertWithRetry(collection, {
+                $vector: vector,
+                text: chunk,
                 title,
-                release_date: releaseDate,
-                text: chunk
-              },
-              {
-                $set: {
-                  $vector: vector,
-                  rating,
-                  where_to_watch: providers,
-                  source: `https://www.themoviedb.org/movie/${movie.id}`
-                }
-              },
-              { upsert: true }
-            )
-            counter++
-            if (counter % 100 === 0) {
-              console.log(`🔄 Progress: ${counter} entries inserted`)
+                release_date,
+                rating: movie.vote_average,
+                where_to_watch: providers,
+                source: `https://www.themoviedb.org/movie/${movie.id}`
+              })
+              console.log(`✅ Inserted chunk for "${title}"`)
+            } catch (err) {
+              console.error(`❌ Failed to insert "${title}" chunk:`, err.message)
             }
-          } catch (err) {
-            console.error(`❌ Error inserting chunk for ${title}:`, err)
           }
-        }
-      }
+        })
+      )
 
-      await sleep(250)
+      await Promise.all(tasks)
+      await sleep(300)
     }
   }
 }
 
-// === Main ===
 const main = async () => {
   await createCollection()
-
-  await Promise.all([
-    ingestMovies(2000, 2004),
-    ingestMovies(2005, 2009),
-    ingestMovies(2010, 2014),
-    ingestMovies(2015, 2019),
-    ingestMovies(2020, 2025),
-  ])
+  await ingestMovies(2003, 2025)
 }
-
-// === Crash Protection ===
-process.on('unhandledRejection', err => {
-  console.error('🔴 Unhandled Rejection:', err)
-})
-process.on('uncaughtException', err => {
-  console.error('🔴 Uncaught Exception:', err)
-})
 
 main()
