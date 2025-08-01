@@ -18,7 +18,6 @@
     "@google/generative-ai": "^0.24.1",
     "@langchain/community": "^0.3.49",
     "@langchain/core": "^0.3.66",
-    "ai": "^5.0.0",
     "dotenv": "^17.2.1",
     "langchain": "^0.3.30",
     "next": "15.4.5",

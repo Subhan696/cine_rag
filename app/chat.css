@@ -1,0 +1,106 @@
+*{
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+.container {
+  min-height: 100vh;
+  padding: 2rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(to bottom right, #000000, #1a1a1a, #333333);
+  color: white;
+  font-family: sans-serif;
+}
+
+.logo {
+  font-size: 3rem;
+  font-weight: bold;
+  color: #ef4444;
+  margin-bottom: 0.5rem;
+}
+
+.logo .white {
+  color: white;
+}
+
+.description {
+  text-align: center;
+  max-width: 700px;
+  margin-bottom: 2rem;
+  color: #ccc;
+}
+
+.quick-prompts {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.5rem;
+  margin-bottom: 2rem;
+}
+
+.prompt-button {
+  background-color: #2d2d2d;
+  color: white;
+  border: none;
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: background 0.3s;
+}
+
+.prompt-button:hover {
+  background-color: #444;
+}
+
+.card {
+  background-color: #1f1f1f;
+  padding: 1.5rem;
+  border-radius: 10px;
+  max-width: 700px;
+  width: 100%;
+  box-shadow: 0 0 10px rgba(255, 255, 255, 0.05);
+}
+
+.input-row {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.chat-input {
+  flex-grow: 1;
+  padding: 0.75rem;
+  border-radius: 6px;
+  border: none;
+  background-color: #333;
+  color: white;
+  font-size: 1rem;
+}
+
+.submit-button {
+  background-color: #ef4444;
+  color: white;
+  border: none;
+  padding: 0.75rem 1rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: bold;
+  transition: background 0.3s;
+}
+
+.submit-button:hover {
+  background-color: #dc2626;
+}
+
+.response-box {
+  background-color: #0f0f0f;
+  padding: 1rem;
+  border-radius: 6px;
+  white-space: pre-wrap;
+  color: #eee;
+  border: 1px solid #333;
+}
