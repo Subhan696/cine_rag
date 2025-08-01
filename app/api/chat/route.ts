@@ -164,20 +164,38 @@ export async function POST(req: Request) {
         `I found these similar movies:\n\n` +
         movies.map((m) => formatMovieResponse(m)).join('\n\n---\n\n') +
         `\n\nWas one of these the movie you meant?`;
-    } else {
+    }
+    else {
       const mainMovie = movies[0];
-      responseText =
-        (await generateMovieAnalysis(mainMovie, query)) ||
-        formatMovieResponse(mainMovie);
+      const similarity = mainMovie?.$similarity ?? 1.0;
+      const matchedTitle = mainMovie.title?.toLowerCase() || '';
+      const intendedTitle = title?.toLowerCase() || '';
 
-      if (movies.length > 1 && !query.toLowerCase().includes('similar')) {
-        responseText += `\n\n**You might also enjoy**:\n` +
-          movies
-            .slice(1, 3)
-            .map((m) => `- **${m.title}** (${m.release_date?.split('-')[0]})`)
-            .join('\n');
+      const isStrongMatch =
+        similarity >= 0.75 ||
+        (title && matchedTitle.includes(intendedTitle));
+
+      if (!isStrongMatch) {
+        // Soft match – don’t auto-analyze
+        responseText = `I found this movie which might be similar to "${query}":\n\n` +
+          formatMovieResponse(mainMovie) +
+          `\n\nWas this the movie you meant? If not, please double-check the title.`;
+      } else {
+        // Confident match – proceed with full analysis
+        responseText =
+          (await generateMovieAnalysis(mainMovie, query)) ||
+          formatMovieResponse(mainMovie);
+
+        if (movies.length > 1 && !query.toLowerCase().includes('similar')) {
+          responseText += `\n\n**You might also enjoy**:\n` +
+            movies
+              .slice(1, 3)
+              .map((m) => `- **${m.title}** (${m.release_date?.split('-')[0]})`)
+              .join('\n');
+        }
       }
     }
+
 
     return new Response(responseText, {
       headers: { "Content-Type": "text/plain" },
